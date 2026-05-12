@@ -24,10 +24,34 @@ from .locator import WatermarkLocation, load_template, locate_watermark
 from .mask_extractor import MaskBundle, extract_masks
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_TEMPLATE = PROJECT_ROOT / "assets" / "watermark_template.png"
+# 默认模板的包内资源路径（相对于 doubao_remover/）。
+# 用 importlib.resources 读取，是为了兼容 wheel/zipapp/editable install 等
+# 各种安装形态——以前用 Path(__file__).parent.parent.parent 推导仓库根，
+# 一旦走 pip install . 安装到 site-packages 就找不到 assets 目录。
+DEFAULT_TEMPLATE_RESOURCE = "assets/watermark_template.png"
 
 log = logging.getLogger(__name__)
+
+
+def _load_default_template() -> np.ndarray:
+    """加载随包分发的默认水印模板。
+
+    通过 importlib.resources 读字节 + cv2.imdecode，避免硬编码文件系统路径。
+    若模板缺失（package-data 配置漏了、安装损坏等），抛出明确异常。
+    """
+    from importlib.resources import files
+    try:
+        data = files(__package__).joinpath(DEFAULT_TEMPLATE_RESOURCE).read_bytes()
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"未找到包内默认模板 {DEFAULT_TEMPLATE_RESOURCE}; "
+            "可能 wheel 打包时漏了 package-data, 或用 -t 显式指定模板"
+        ) from e
+    arr = np.frombuffer(data, dtype=np.uint8)
+    template = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if template is None:
+        raise RuntimeError(f"默认模板解码失败: {DEFAULT_TEMPLATE_RESOURCE}")
+    return template
 
 
 @dataclass(frozen=True)
@@ -72,7 +96,7 @@ def remove_watermark_array(
         RemovalResult
     """
     if template is None:
-        template = load_template(DEFAULT_TEMPLATE)
+        template = _load_default_template()
 
     log.info("step 1/4: 定位水印")
     location = locate_watermark(image, template)
@@ -109,7 +133,19 @@ def remove_watermark_array(
         log.warning("  inpaint_mask 为空, 跳过 LaMa")
         result_image = image_after_unblend
     else:
-        result_image = inpaint(image_after_unblend, masks.inpaint_mask)
+        lama_output = inpaint(image_after_unblend, masks.inpaint_mask)
+        # 软边缘混合：LaMa 在矩形 mask 上常常生成"边缘突然变模糊"的过渡，
+        # 用 mask 的高斯模糊版本做 alpha 通道，让 mask 中心完全用 LaMa 输出，
+        # 边缘羽化过渡回原图，消除"涂抹色块的硬边"。
+        blur_radius = max(11, (min(masks.inpaint_mask.shape) // 60) | 1)
+        if blur_radius % 2 == 0:
+            blur_radius += 1
+        soft_alpha = cv2.GaussianBlur(masks.inpaint_mask, (blur_radius, blur_radius), 0)
+        soft_alpha_f = (soft_alpha.astype(np.float32) / 255.0)[..., None]
+        result_image = (
+            lama_output.astype(np.float32) * soft_alpha_f
+            + image_after_unblend.astype(np.float32) * (1.0 - soft_alpha_f)
+        ).clip(0, 255).astype(np.uint8)
 
     if debug_dir is not None:
         cv2.imwrite(str(Path(debug_dir) / "final_result.png"), result_image)
@@ -132,8 +168,30 @@ def remove_watermark_file(
     alpha: float = DEFAULT_ALPHA,
     logo_bgr: tuple[int, int, int] | None = None,
     debug_dir: str | Path | None = None,
+    overwrite: bool = False,
 ) -> RemovalResult:
-    """读文件 → 处理 → 写文件。"""
+    """读文件 → 处理 → 写文件。
+
+    新增 overwrite: 是否允许输出路径与输入路径解析到同一文件。
+    默认 False, 防止误把原图覆盖丢失 (cv2.imwrite 先把文件 truncate 再写,
+    原图数据会瞬间丢失)。CLI 默认也是 False, 加 --overwrite 才放行。
+    """
+    in_resolved = Path(input_path).resolve() if Path(input_path).exists() else None
+    out = Path(output_path)
+    # 防覆盖检查放在最前面, 失败也不会让 LaMa 跑完一遍才发现.
+    # 只有 input 真实存在时才能 resolve 并比较, 否则按"无冲突"处理
+    # (cv2.imread 后面也会就 "无法读取" 报错)。
+    if in_resolved is not None and not overwrite:
+        try:
+            same = out.resolve() == in_resolved
+        except (OSError, RuntimeError):
+            same = False
+        if same:
+            raise ValueError(
+                f"输出路径与输入路径相同, 会覆盖原图: {in_resolved}; "
+                "传 overwrite=True 才允许"
+            )
+
     image = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"无法读取图片: {input_path}")
@@ -148,7 +206,6 @@ def remove_watermark_file(
         debug_dir=debug_dir,
     )
 
-    out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(out), result.image):
         raise IOError(f"写入失败: {output_path}")

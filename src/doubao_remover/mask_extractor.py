@@ -138,16 +138,28 @@ def extract_masks(
 
     # 6. 模式分支
     if mode == "photo":
-        # photo 模式：直接把水印紧 bbox 当 inpaint mask，不保护任何东西
+        # photo 模式：用 locator 的紧 bbox 作矩形 mask 送 LaMa。
+        # 颜色阈值在彩色背景上失效（棕黄地面、绿草等会让 grayish 判定不命中），
+        # 模板形状 mask 又因为 fallback 定位不准会漂移到错位置；折中走 tight
+        # bbox 整块矩形。pipeline 后续会用高斯软边混合，让 LaMa 输出的边缘
+        # 平滑过渡到原图，减少"色块硬边"。
+        # 残余的"中心模糊感"是 LaMa 在大矩形 mask 上的固有特性，本算法层面
+        # 无法消除，需要更强的模型（如 SD inpaint）或更精确的水印定位。
+        tx, ty, tw, th = location.tight_bbox
+        rel_x = max(0, tx - location.x)
+        rel_y = max(0, ty - location.y)
+        rel_w = min(roi.shape[1] - rel_x, tw)
+        rel_h = min(roi.shape[0] - rel_y, th)
         photo_mask = np.zeros_like(wm_candidate)
-        ys2, xs2 = np.where(trusted_wm > 0)
-        if len(xs2) > 0:
-            # 比 alpha 用的范围更紧，但加固定 padding 让 LaMa 有边缘上下文
-            px1 = max(0, int(xs2.min()) - photo_mask_padding)
-            px2 = min(wm_candidate.shape[1], int(xs2.max()) + photo_mask_padding + 1)
-            py1 = max(0, int(ys2.min()) - photo_mask_padding)
-            py2 = min(wm_candidate.shape[0], int(ys2.max()) + photo_mask_padding + 1)
-            photo_mask[py1:py2, px1:px2] = 255
+        # 安全外扩像素：把 photo_mask_padding 接到此处, 让函数参数真生效。
+        # 留几像素是为了兜住模板匹配/fallback bbox 的轻微偏差,
+        # 不至于让水印边缘 1-2 像素漏在 LaMa 修复区外。
+        safety = max(0, int(photo_mask_padding))
+        sx1 = max(0, rel_x - safety)
+        sy1 = max(0, rel_y - safety)
+        sx2 = min(roi.shape[1], rel_x + rel_w + safety)
+        sy2 = min(roi.shape[0], rel_y + rel_h + safety)
+        photo_mask[sy1:sy2, sx1:sx2] = 255
         inpaint_expanded = photo_mask
         alpha_blend_local = np.zeros_like(alpha_blend_local)
 

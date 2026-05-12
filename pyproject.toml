@@ -15,5 +15,20 @@ dependencies = [
     "simple-lama-inpainting>=0.1.2",
 ]
 
+# 开发用可选依赖, 装法: `pip install -e .[dev]`
+[project.optional-dependencies]
+dev = [
+    "pytest>=7,<9",
+]
+
+# 安装后注册命令: 用户可以直接 `doubao-remover -i foo.jpg` 而不必 `python -m doubao_remover`.
+[project.scripts]
+doubao-remover = "doubao_remover.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 把包内 assets/ 下的资源（默认水印模板等）一并打进 wheel；
+# 没有这一段, pip install . 后运行会找不到 assets/watermark_template.png。
+[tool.setuptools.package-data]
+doubao_remover = ["assets/*.png"]

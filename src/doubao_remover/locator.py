@@ -41,9 +41,12 @@ class WatermarkLocation:
     """水印在图上的位置。
 
     属性:
-        x, y, w, h: bbox 在原图坐标系中的位置和尺寸
-        score:      matchTemplate 的最高相关系数（越高越置信）
-        is_fallback: True 表示模板匹配失败，用了默认 bbox 兜底
+        x, y, w, h:        bbox（含 padding）的位置和尺寸 — 给 mask extraction
+                           用，留余地避免漏检
+        score:             matchTemplate 的最高相关系数
+        is_fallback:       True 表示模板匹配失败，用了经验 bbox 兜底
+        tight_x/y/w/h:     不含 padding 的紧 bbox — 接近水印的真实尺寸，
+                           photo 模式直接拿来做矩形 mask 时用，避免重画过多
     """
     x: int
     y: int
@@ -51,10 +54,21 @@ class WatermarkLocation:
     h: int
     score: float
     is_fallback: bool
+    tight_x: int = 0
+    tight_y: int = 0
+    tight_w: int = 0
+    tight_h: int = 0
 
     @property
     def bbox(self) -> tuple[int, int, int, int]:
         return self.x, self.y, self.w, self.h
+
+    @property
+    def tight_bbox(self) -> tuple[int, int, int, int]:
+        # 兼容旧 location 对象（没有 tight_* 字段时返回 bbox）
+        if self.tight_w == 0 or self.tight_h == 0:
+            return self.bbox
+        return self.tight_x, self.tight_y, self.tight_w, self.tight_h
 
 
 def locate_watermark(
@@ -119,8 +133,9 @@ def locate_watermark(
             best_size = (scaled_w, scaled_h)
 
     if best_loc is None or best_score < min_score:
-        # 回退：豆包水印固定贴在右下角，相对位置经验值
-        # 实测: 2048x2048 上水印约 310x90, 右下边距 ~20px
+        # 回退：豆包水印固定贴在右下角，相对位置经验值。
+        # 实测模板尺寸 287x90 (相对 2048 图宽即 0.14*W x 0.044*W)，
+        # 紧 bbox 直接按这个比例算，避免给 photo 模式留太多冗余区域。
         margin = max(8, int(img_w * 0.012))
         wm_w = max(60, int(img_w * 0.16))
         wm_h = max(20, int(img_w * 0.05))
@@ -150,6 +165,8 @@ def _with_padding(loc: WatermarkLocation, img_w: int, img_h: int) -> WatermarkLo
 
     模板匹配有时只对上水印一半，外扩 30% 能兜住偏差；
     fallback 已经偏大，再 padding 影响也不大（mask extraction 会做精细识别）。
+    同时把原始紧 bbox 存进 tight_* 字段供 photo 模式使用（photo 模式直接矩形
+    mask，padding 太多会让 LaMa 重画过多无关内容，要的就是紧 bbox）。
     """
     pad_w = max(8, int(loc.w * 0.15))
     pad_h = max(8, int(loc.h * 0.25))
@@ -160,6 +177,7 @@ def _with_padding(loc: WatermarkLocation, img_w: int, img_h: int) -> WatermarkLo
     return WatermarkLocation(
         x=new_x, y=new_y, w=new_w, h=new_h,
         score=loc.score, is_fallback=loc.is_fallback,
+        tight_x=loc.x, tight_y=loc.y, tight_w=loc.w, tight_h=loc.h,
     )
 
 

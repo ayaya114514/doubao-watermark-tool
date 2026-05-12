@@ -83,6 +83,8 @@ def inpaint(image_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
     lama = _get_lama()
 
+    h_in, w_in = image_bgr.shape[:2]
+
     # simple_lama 要 PIL RGB image 和 PIL L mask
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(image_rgb)
@@ -92,4 +94,11 @@ def inpaint(image_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
     # 结果转回 BGR ndarray
     result_rgb = np.array(result_pil)
-    return cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+    result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+
+    # LaMa 内部会 pad 到 8 的倍数；如果输入不是 8 的倍数，输出会比输入大几像素。
+    # 裁回输入尺寸，让 (输入大小 == 输出大小) 这个不变式始终成立。
+    if result_bgr.shape[:2] != (h_in, w_in):
+        result_bgr = result_bgr[:h_in, :w_in]
+
+    return result_bgr
