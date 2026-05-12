@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 打包/分发产物
+build/
+dist/
+*.egg-info/
+*.egg
+
+# 测试 / 临时输出
+.pytest_cache/
+.coverage
+htmlcov/
+debug_*.png
+*_clean.jpg
+*_clean.png
+
+# 模型缓存（LaMa 权重首次下载到 ~/.cache，但有些封装会缓存到项目目录）
+.cache/
+models/
+*.pt
+*.pth
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db

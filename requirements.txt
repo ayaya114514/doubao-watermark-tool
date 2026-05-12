@@ -1,0 +1,9 @@
+# 图像处理
+opencv-python-headless>=4.8,<5
+numpy>=1.24,<2
+Pillow>=9.5,<10
+
+
+# LaMa inpainting（封装了 PyTorch 模型加载 + 推理）
+# 注：simple-lama-inpainting 会自动拉取 torch 依赖
+simple-lama-inpainting>=0.1.2
