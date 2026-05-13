@@ -33,6 +33,9 @@ SCALE_FACTORS = (0.7, 0.85, 1.0, 1.15, 1.3, 1.45)
 # 普遍只在 0.3 附近，比这低的匹配往往漂移到错的位置。
 # 阈值卡在 0.5 让大多数情况走 fallback bbox（经验位置稳，padding 足够）；
 # 高于 0.5 才说明模板和图都很干净，匹配可信。
+# 试过降到 0.3 让"真匹配"也能用上, 但 0.3-0.5 区间内的"漂移误匹配"数量
+# 同样会跟着进来——实测在一张浅色照片上误匹配到老鼠身体下方, 反而盖不住
+# 实际水印。0.5 这道墙还是要保留。
 MIN_MATCH_SCORE = 0.5
 
 
@@ -107,6 +110,22 @@ def locate_watermark(
     search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
     template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
+    # 全局极性检测: 整张图平均亮度低于 100 视为黑底白字场景。
+    # 这种图上水印相对背景的"明暗方向"跟模板的浅色背景训练样本相反,
+    # 直接跑 TM_CCOEFF_NORMED 分数会被压得很低 (实测黑底图只能到 0.2);
+    # 反相后搜索图回到"白底深色水印"的极性, 跟模板对得上。
+    # 之前试过"两个极性都跑取最大"的策略, 副作用是浅色图也会跟反相版本
+    # 比对一次, 反相图里随机区域可能产生虚假高分(实测在老鼠照片上反相
+    # match 漂到了老鼠身体下方, score 比真匹配还高), 反而把水印漏掉。
+    # 改成"只跑对应极性"——明暗判定错时最坏退化到 fallback bbox, 不会
+    # 主动制造误匹配。
+    img_gray_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    is_globally_dark = float(img_gray_full.mean()) < 100
+    if is_globally_dark:
+        search_for_match = cv2.bitwise_not(search_gray)
+    else:
+        search_for_match = search_gray
+
     best_score = -1.0
     best_loc: tuple[int, int] | None = None
     best_size: tuple[int, int] | None = None
@@ -117,14 +136,14 @@ def locate_watermark(
         scaled_h = max(8, int(tpl_h * scale))
 
         # 模板比搜索区还大就跳过
-        if scaled_w >= search_gray.shape[1] or scaled_h >= search_gray.shape[0]:
+        if scaled_w >= search_for_match.shape[1] or scaled_h >= search_for_match.shape[0]:
             continue
 
         # 选缩放插值：放大用 LINEAR，缩小用 AREA，符合 OpenCV 建议
         interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
         scaled_template = cv2.resize(template_gray, (scaled_w, scaled_h), interpolation=interp)
 
-        result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+        result = cv2.matchTemplate(search_for_match, scaled_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
         if max_val > best_score:

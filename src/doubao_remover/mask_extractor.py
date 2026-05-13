@@ -47,6 +47,7 @@ def extract_masks(
     min_wm_component_area: int = 8,
     final_dilate_iter: int = 1,
     photo_mask_padding: int = 6,
+    auto_polarity: bool = True,
     debug_dir: str | None = None,
 ) -> MaskBundle:
     """从 image 的 bbox 内同时提取 inpaint_mask 和 alpha_blend_mask。
@@ -69,6 +70,10 @@ def extract_masks(
         min_wm_component_area: 水印连通域的最小面积
         final_dilate_iter: inpaint mask 最终膨胀次数
         photo_mask_padding: photo 模式下水印紧 bbox 向外扩的像素数
+        auto_polarity: 是否根据 bbox 内平均亮度自适应翻转阈值。
+            ROI 平均亮度低于阈值时判为"黑底白字"场景, 自动把 brightness
+            window 和 protect 方向反过来; 否则用传入的浅色背景默认值。
+            关闭后退回旧版固定阈值行为, 便于复现或显式控制。
         debug_dir: 不为 None 时保存中间产物
 
     返回:
@@ -84,6 +89,23 @@ def extract_masks(
     roi = image[y:y2, x:x2]
     roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
+    # 极性检测: 默认阈值是为"白底深字 + 浅灰水印"调的; 反相场景 (黑底白字 +
+    # 中等亮度水印) 下亮度窗口和保护方向都得翻过来, 否则 wm_candidate / protect
+    # 全部踩空 (0 px mask)。判定用 ROI 平均亮度 (<100 视为暗背景), 因为
+    # locator 给的 bbox 范围已经聚焦在水印附近, ROI 平均亮度对水印所在区域
+    # 的"主色调"是稳定可靠的代理。
+    is_dark_bg = auto_polarity and float(roi_gray.mean()) < 100
+    if is_dark_bg:
+        # 黑底白字: 水印的"豆包AI生成"在黑底上呈现为中等亮度的浅灰 (~80-180),
+        # 比文字 (>200) 暗、比背景 (~0-30) 亮。保护对象从"暗于阈值"换成
+        # "亮于阈值"——这样白色正文才能被保护起来不被改写。
+        brightness_low = 80
+        brightness_high = 180
+        protect_threshold = 200
+        protect_is_above = True
+    else:
+        protect_is_above = False
+
     # 1. 水印颜色候选：浅灰 + 亮度在水印典型区间
     b, g, r = cv2.split(roi)
     bi, gi, ri = b.astype(np.int32), g.astype(np.int32), r.astype(np.int32)
@@ -95,8 +117,12 @@ def extract_masks(
     is_in_brightness = (roi_gray > brightness_low) & (roi_gray < brightness_high)
     wm_candidate = (is_grayish & is_in_brightness).astype(np.uint8) * 255
 
-    # 2. 保护区：暗部（黑字、阴影）+ 膨胀
-    protect_raw = (roi_gray < protect_threshold).astype(np.uint8) * 255
+    # 2. 保护区：暗背景下保护"亮于阈值"的像素 (白字),
+    #            白背景下保护"暗于阈值"的像素 (黑字), 再向外膨胀几格。
+    if protect_is_above:
+        protect_raw = (roi_gray > protect_threshold).astype(np.uint8) * 255
+    else:
+        protect_raw = (roi_gray < protect_threshold).astype(np.uint8) * 255
     kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     protect = cv2.dilate(protect_raw, kernel3, iterations=protect_dilate_iter)
 
