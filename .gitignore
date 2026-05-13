@@ -23,6 +23,10 @@ htmlcov/
 debug_*.png
 *_clean.jpg
 *_clean.png
+# 例外: docs/comparison/ 下的 _clean 图是 README 用的效果对比样例,
+# 要被版本控制; 上面的通配规则会误伤, 这里加豁免放行。
+!docs/comparison/*_clean.jpg
+!docs/comparison/*_clean.png
 
 # 模型缓存（LaMa 权重首次下载到 ~/.cache，但有些封装会缓存到项目目录）
 .cache/
